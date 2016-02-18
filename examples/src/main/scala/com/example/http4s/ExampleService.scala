@@ -3,15 +3,13 @@ package com.example.http4s
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
 
-import org.http4s.headers.{`Transfer-Encoding`, `Content-Type`}
+import org.http4s.headers.{`Content-Type`, `Content-Length`}
 import org.http4s._
 import org.http4s.MediaType._
 import org.http4s.dsl._
 import org.http4s.argonaut._
 import org.http4s.scalaxml._
 import org.http4s.server._
-import org.http4s.server.middleware.EntityLimiter
-import org.http4s.server.middleware.EntityLimiter.EntityTooLarge
 import org.http4s.server.middleware.PushSupport._
 import org.http4s.server.middleware.authentication._
 import org.http4s.twirl._
@@ -110,6 +108,30 @@ object ExampleService {
       Ok(html.submissionForm("sum"))
 
     ///////////////////////////////////////////////////////////////
+    ////////////////////// Blaze examples /////////////////////////
+
+    // You can use the same service for GET and HEAD. For HEAD request,
+    // only the Content-Length is sent (if static content)
+    case req @ GET -> Root / "helloworld" =>
+      helloWorldService
+    case req @ HEAD -> Root / "helloworld" =>
+      helloWorldService
+
+    // HEAD responses with Content-Lenght, but empty content
+    case req @ HEAD -> Root / "head" =>
+      Ok("").putHeaders(`Content-Length`(1024))
+
+    // Response with invalid Content-Length header generates
+    // an error (underflow causes the connection to be closed)
+    case req @ GET -> Root / "underflow" =>
+      Ok("foo").putHeaders(`Content-Length`(4))
+
+    // Response with invalid Content-Length header generates
+    // an error (overflow causes the extra bytes to be ignored)
+    case req @ GET -> Root / "overflow" =>
+      Ok("foo").putHeaders(`Content-Length`(2))
+
+    ///////////////////////////////////////////////////////////////
     //////////////// Form encoding example ////////////////////////
     case req @ GET -> Root / "form-encoded" =>
       Ok(html.formEncoded())
@@ -134,7 +156,10 @@ object ExampleService {
       StaticFile.fromResource("/nasa_blackhole_image.jpg", Some(req))
         .map(Task.now)
         .getOrElse(NotFound())
+
   }
+
+  def helloWorldService = Ok("Hello World!")
 
   // This is a mock data source, but could be a Process representing results from a database
   def dataStream(n: Int): Process[Task, String] = {

@@ -3,12 +3,12 @@ package blaze
 
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 
 import org.http4s.headers.`Transfer-Encoding`
 import org.http4s.{headers => H}
 import org.http4s.blaze.util.BufferTools.{concatBuffers, emptyBuffer}
 import org.http4s.blaze.http.http_parser.BaseExceptions.ParserException
-import org.http4s.blaze.pipeline.Command.EOF
 import org.http4s.blaze.pipeline.{Command, TailStage}
 import org.http4s.blaze.util._
 import org.http4s.util.{Writer, StringWriter}
@@ -22,6 +22,7 @@ import scalaz.stream.Cause.{Terminated, End}
 import scalaz.{-\/, \/-}
 import scalaz.concurrent.Task
 
+/** Utility bits for dealing with the HTTP 1.x protocol */
 trait Http1Stage { self: TailStage[ByteBuffer] =>
 
   /** ExecutionContext to be used for all Future continuations
@@ -79,7 +80,7 @@ trait Http1Stage { self: TailStage[ByteBuffer] =>
 
       // add KeepAlive to Http 1.0 responses if the header isn't already present
       if (!closeOnFinish && minor == 0 && connectionHeader.isEmpty) rr << "Connection:keep-alive\r\n\r\n"
-      else rr << '\r' << '\n'
+      else rr << "\r\n"
 
       val b = ByteBuffer.wrap(rr.result().getBytes(StandardCharsets.ISO_8859_1))
       new IdentityWriter(b, h.length, this)
@@ -88,7 +89,7 @@ trait Http1Stage { self: TailStage[ByteBuffer] =>
       if (minor == 0) { // we are replying to a HTTP 1.0 request see if the length is reasonable
         if (closeOnFinish) {  // HTTP 1.0 uses a static encoder
           logger.trace("Using static encoder")
-          rr << '\r' << '\n'
+          rr << "\r\n"
           val b = ByteBuffer.wrap(rr.result().getBytes(StandardCharsets.ISO_8859_1))
           new IdentityWriter(b, -1, this)
         }
@@ -101,12 +102,8 @@ trait Http1Stage { self: TailStage[ByteBuffer] =>
         case Some(enc) => // Signaling chunked means flush every chunk
           if (enc.hasChunked) new ChunkProcessWriter(rr, this, trailer)
           else  {   // going to do identity
-            if (enc.hasIdentity) {
-              rr << "Transfer-Encoding: identity\r\n"
-            } else {
-              logger.warn(s"Unknown transfer encoding: '${enc.value}'. Defaulting to Identity Encoding and stripping header")
-            }
-            rr << '\r' << '\n'
+            logger.warn(s"Unknown transfer encoding: '${enc.value}'. Stripping header.")
+            rr << "\r\n"
             val b = ByteBuffer.wrap(rr.result().getBytes(StandardCharsets.ISO_8859_1))
             new IdentityWriter(b, -1, this)
           }
@@ -122,60 +119,79 @@ trait Http1Stage { self: TailStage[ByteBuffer] =>
     * @param buffer starting `ByteBuffer` to use in parsing.
     * @param eofCondition If the other end hangs up, this is the condition used in the Process for termination.
     *                     The desired result will differ between Client and Server as the former can interpret
-    *                     and [[EOF]] as the end of the body while a server cannot.
+    *                     and [[Command.EOF]] as the end of the body while a server cannot.
     */
   final protected def collectBodyFromParser(buffer: ByteBuffer, eofCondition:() => Throwable): (EntityBody, () => Future[ByteBuffer]) = {
     if (contentComplete()) {
       if (buffer.remaining() == 0) Http1Stage.CachedEmptyBody
       else (EmptyBody, () => Future.successful(buffer))
     }
-    else {
-      @volatile var currentBuffer = buffer
+      // try parsing the existing buffer: many requests will come as a single chunk
+    else if (buffer.hasRemaining()) doParseContent(buffer) match {
+      case Some(chunk) if contentComplete() =>
+        emit(ByteVector(chunk)) -> Http1Stage.futureBufferThunk(buffer)
 
-      // TODO: we need to work trailers into here somehow
-      val t = Task.async[ByteVector]{ cb =>
-        if (!contentComplete()) {
+      case Some(chunk) =>
+        val (rst,end) = streamingBody(buffer, eofCondition)
+        (emit(ByteVector(chunk)) ++ rst, end)
 
-          def go(): Unit = try {
-            val parseResult = doParseContent(currentBuffer)
-            logger.trace(s"ParseResult: $parseResult, content complete: ${contentComplete()}")
-            parseResult match {
-              case Some(result) =>
-                cb(\/-(ByteVector(result)))
+      case None if contentComplete() =>
+        if (buffer.hasRemaining) EmptyBody -> Http1Stage.futureBufferThunk(buffer)
+        else Http1Stage.CachedEmptyBody
 
-              case None if contentComplete() =>
-                cb(-\/(Terminated(End)))
-
-              case None =>
-                channelRead().onComplete {
-                  case Success(b)   =>
-                    currentBuffer = BufferTools.concatBuffers(currentBuffer, b)
-                    go()
-
-                  case Failure(EOF) =>
-                    cb(-\/(eofCondition()))
-
-                  case Failure(t)   =>
-                    logger.error(t)("Unexpected error reading body.")
-                    cb(-\/(t))
-                }
-            }
-          } catch {
-            case t: ParserException =>
-              fatalError(t, "Error parsing request body")
-              cb(-\/(InvalidBodyException(t.getMessage())))
-
-            case t: Throwable =>
-              fatalError(t, "Error collecting body")
-              cb(-\/(t))
-          }
-          go()
-        }
-        else cb(-\/(Terminated(End)))
-      }
-
-      (repeatEval(t).onHalt(_.asHalt), () => drainBody(currentBuffer))
+      case None => streamingBody(buffer, eofCondition)
     }
+      // we are not finished and need more data.
+    else streamingBody(buffer, eofCondition)
+  }
+
+  // Streams the body off the wire
+  private def streamingBody(buffer: ByteBuffer, eofCondition:() => Throwable): (EntityBody, () => Future[ByteBuffer]) = {
+    @volatile var currentBuffer = buffer
+
+    // TODO: we need to work trailers into here somehow
+    val t = Task.async[ByteVector]{ cb =>
+      if (!contentComplete()) {
+
+        def go(): Unit = try {
+          val parseResult = doParseContent(currentBuffer)
+          logger.trace(s"ParseResult: $parseResult, content complete: ${contentComplete()}")
+          parseResult match {
+            case Some(result) =>
+              cb(\/-(ByteVector(result)))
+
+            case None if contentComplete() =>
+              cb(-\/(Terminated(End)))
+
+            case None =>
+              channelRead().onComplete {
+                case Success(b)   =>
+                  currentBuffer = BufferTools.concatBuffers(currentBuffer, b)
+                  go()
+
+                case Failure(Command.EOF) =>
+                  cb(-\/(eofCondition()))
+
+                case Failure(t)   =>
+                  logger.error(t)("Unexpected error reading body.")
+                  cb(-\/(t))
+              }
+          }
+        } catch {
+          case t: ParserException =>
+            fatalError(t, "Error parsing request body")
+            cb(-\/(InvalidBodyException(t.getMessage())))
+
+          case t: Throwable =>
+            fatalError(t, "Error collecting body")
+            cb(-\/(t))
+        }
+        go()
+      }
+      else cb(-\/(Terminated(End)))
+    }
+
+    (repeatEval(t).onHalt(_.asHalt), () => drainBody(currentBuffer))
   }
 
   /** Called when a fatal error has occurred
@@ -193,46 +209,29 @@ trait Http1Stage { self: TailStage[ByteBuffer] =>
   final protected def drainBody(buffer: ByteBuffer): Future[ByteBuffer] = {
     logger.trace(s"Draining body: $buffer")
 
-    def drainBody(buffer: ByteBuffer, p: Promise[ByteBuffer]): Unit = {
-      try {
-        if (!contentComplete()) {
-          while(!contentComplete() && doParseContent(buffer).nonEmpty) { } // we just discard the results
+    while (!contentComplete() && doParseContent(buffer).nonEmpty) { /* NOOP */ }
 
-          if (!contentComplete()) {
-            logger.trace("drainBody needs more data.")
-            channelRead().onComplete {
-              case Success(newBuffer) =>
-                logger.trace(s"Drain buffer received: $newBuffer")
-                drainBody(concatBuffers(buffer, newBuffer), p)
-
-              case Failure(t) => p.tryFailure(t)
-            }(Execution.trampoline)
-          }
-          else p.trySuccess(buffer)
-        }
-        else {
-          logger.trace("Body drained.")
-          p.trySuccess(buffer)
-        }
-      } catch { case t: Throwable => p.tryFailure(t) }
-    }
-
-    if (!contentComplete()) {
-      val p = Promise[ByteBuffer]
-      drainBody(buffer, p)
-      p.future
-    }
+    if (contentComplete()) Future.successful(buffer)
     else {
-      logger.trace("No body to drain.")
-      Future.successful(buffer)
+      // Send the EOF to trigger a connection shutdown
+      logger.info(s"HTTP body not read to completion. Dropping connection.")
+      Future.failed(Command.EOF)
     }
   }
 }
 
 object Http1Stage {
-  val CachedEmptyBody = {
-    val f = Future.successful(emptyBuffer)
-    (EmptyBody, () => f)
+
+  private val CachedEmptyBufferThunk = {
+    val b = Future.successful(emptyBuffer)
+    () => b
+  }
+
+  private val CachedEmptyBody = EmptyBody -> CachedEmptyBufferThunk
+
+  private def futureBufferThunk(buffer: ByteBuffer): () => Future[ByteBuffer] = {
+    if (buffer.hasRemaining) { () => Future.successful(buffer) }
+    else CachedEmptyBufferThunk
   }
 
   /** Encodes the headers into the Writer, except the Transfer-Encoding header which may be returned
@@ -243,12 +242,12 @@ object Http1Stage {
     headers.foreach { header =>
       if (isServer && header.name == H.Date.name) dateEncoded = true
 
-      if (header.name != `Transfer-Encoding`.name) rr << header << '\r' << '\n'
+      if (header.name != `Transfer-Encoding`.name) rr << header << "\r\n"
       else encoding = `Transfer-Encoding`.matchHeader(header)
     }
 
     if (isServer && !dateEncoded) {
-      rr << H.Date.name << ':' << ' '; DateTime.now.renderRfc1123DateTimeString(rr) << '\r' << '\n'
+      rr << H.Date.name << ": " << Instant.now() << "\r\n"
     }
 
     encoding

@@ -24,9 +24,10 @@ class Http1ClientStageSpec extends Specification {
 
   val ec = org.http4s.blaze.util.Execution.trampoline
 
-  val www_foo_com = Uri.uri("http://www.foo.com")
-  val FooRequest = Request(uri = www_foo_com)
-  
+  val www_foo_test = Uri.uri("http://www.foo.test")
+  val FooRequest = Request(uri = www_foo_test)
+  val FooRequestKey = RequestKey.fromRequest(FooRequest)
+
   val LongDuration = 30.seconds
 
   // Common throw away response
@@ -35,7 +36,7 @@ class Http1ClientStageSpec extends Specification {
   def mkBuffer(s: String): ByteBuffer =
     ByteBuffer.wrap(s.getBytes(StandardCharsets.ISO_8859_1))
 
-  def getSubmission(req: Request, resp: String, stage: Http1ClientStage): (String, String) = {
+  def getSubmission(req: Request, resp: String, stage: Http1Connection, flushPrelude: Boolean): (String, String) = {
     val h = new SeqTestHead(resp.toSeq.map{ chr =>
       val b = ByteBuffer.allocate(1)
       b.put(chr.toByte).flip()
@@ -43,7 +44,7 @@ class Http1ClientStageSpec extends Specification {
     })
     LeafBuilder(stage).base(h)
 
-    val result = new String(stage.runRequest(req)
+    val result = new String(stage.runRequest(req, flushPrelude)
       .run
       .body
       .runLog
@@ -57,9 +58,12 @@ class Http1ClientStageSpec extends Specification {
     (request, result)
   }
 
-  def getSubmission(req: Request, resp: String): (String, String) =
-    getSubmission(req, resp, new Http1ClientStage(DefaultUserAgent, ec))
-
+  def getSubmission(req: Request, resp: String, flushPrelude: Boolean = false): (String, String) = {
+    val key = RequestKey.fromRequest(req)
+    val tail = new Http1Connection(key, DefaultUserAgent, ec)
+    try getSubmission(req, resp, tail, flushPrelude)
+    finally { tail.shutdown() }
+  }
 
   "Http1ClientStage" should {
 
@@ -73,7 +77,7 @@ class Http1ClientStageSpec extends Specification {
 
     "Submit a request line with a query" in {
       val uri = "/huh?foo=bar"
-      val \/-(parsed) = Uri.fromString("http://www.foo.com" + uri)
+      val \/-(parsed) = Uri.fromString("http://www.foo.test" + uri)
       val req = Request(uri = parsed)
 
       val (request, response) = getSubmission(req, resp)
@@ -84,37 +88,54 @@ class Http1ClientStageSpec extends Specification {
     }
 
     "Fail when attempting to get a second request with one in progress" in {
-      val tail = new Http1ClientStage(DefaultUserAgent, ec)
-      val h = new SeqTestHead(List(mkBuffer(resp), mkBuffer(resp)))
+      val tail = new Http1Connection(FooRequestKey, DefaultUserAgent, ec)
+      val (frag1,frag2) = resp.splitAt(resp.length-1)
+      val h = new SeqTestHead(List(mkBuffer(frag1), mkBuffer(frag2), mkBuffer(resp)))
       LeafBuilder(tail).base(h)
 
-      tail.runRequest(FooRequest).run  // we remain in the body
-
-      tail.runRequest(FooRequest).run must throwA[Http1ClientStage.InProgressException.type]
+      try {
+        tail.runRequest(FooRequest, false).run  // we remain in the body
+        tail.runRequest(FooRequest, false).run must throwA[Http1Connection.InProgressException.type]
+      }
+      finally {
+        tail.shutdown()
+      }
     }
 
     "Reset correctly" in {
-      val tail = new Http1ClientStage(DefaultUserAgent, ec)
-      val h = new SeqTestHead(List(mkBuffer(resp), mkBuffer(resp)))
-      LeafBuilder(tail).base(h)
+      val tail = new Http1Connection(FooRequestKey, DefaultUserAgent, ec)
+      try {
+        val h = new SeqTestHead(List(mkBuffer(resp), mkBuffer(resp)))
+        LeafBuilder(tail).base(h)
 
-      // execute the first request and run the body to reset the stage
-      tail.runRequest(FooRequest).run.body.run.run
+        // execute the first request and run the body to reset the stage
+        tail.runRequest(FooRequest, false).run.body.run.run
 
-      val result = tail.runRequest(FooRequest).run
-      result.headers.size must_== 1
+        val result = tail.runRequest(FooRequest, false).run
+        tail.shutdown()
+
+        result.headers.size must_== 1
+      }
+      finally {
+        tail.shutdown()
+      }
     }
 
     "Alert the user if the body is to short" in {
       val resp = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\ndone"
+      val tail = new Http1Connection(FooRequestKey, DefaultUserAgent, ec)
 
-      val tail = new Http1ClientStage(DefaultUserAgent, ec)
-      val h = new SeqTestHead(List(mkBuffer(resp)))
-      LeafBuilder(tail).base(h)
+      try {
+        val h = new SeqTestHead(List(mkBuffer(resp)))
+        LeafBuilder(tail).base(h)
 
-      val result = tail.runRequest(FooRequest).run
+        val result = tail.runRequest(FooRequest, false).run
 
-      result.body.run.run must throwA[InvalidBodyException]
+        result.body.run.run must throwA[InvalidBodyException]
+      }
+      finally {
+        tail.shutdown()
+      }
     }
 
     "Interpret a lack of length with a EOF as a valid message" in {
@@ -128,13 +149,13 @@ class Http1ClientStageSpec extends Specification {
     "Utilize a provided Host header" in {
       val resp = "HTTP/1.1 200 OK\r\n\r\ndone"
 
-      val req = FooRequest.replaceAllHeaders(headers.Host("bar.com"))
+      val req = FooRequest.replaceAllHeaders(headers.Host("bar.test"))
 
       val (request, response) = getSubmission(req, resp)
 
       val requestLines = request.split("\r\n").toList
 
-      requestLines must contain("Host: bar.com")
+      requestLines must contain("Host: bar.test")
       response must_==("done")
     }
 
@@ -164,24 +185,41 @@ class Http1ClientStageSpec extends Specification {
 
     "Not add a User-Agent header when configured with None" in {
       val resp = "HTTP/1.1 200 OK\r\n\r\ndone"
+      val tail = new Http1Connection(FooRequestKey, None, ec)
 
-      val tail = new Http1ClientStage(None, ec)
-      val (request, response) = getSubmission(FooRequest, resp, tail)
+      try {
+        val (request, response) = getSubmission(FooRequest, resp, tail, false)
+        tail.shutdown()
 
-      val requestLines = request.split("\r\n").toList
+        val requestLines = request.split("\r\n").toList
 
-      requestLines.find(_.startsWith("User-Agent")) must beNone
-      response must_==("done")
+        requestLines.find(_.startsWith("User-Agent")) must beNone
+        response must_==("done")
+      }
+      finally {
+        tail.shutdown()
+      }
     }
 
     "Allow an HTTP/1.0 request without a Host header" in {
       val resp = "HTTP/1.0 200 OK\r\n\r\ndone"
 
-      val req = Request(uri = www_foo_com, httpVersion = HttpVersion.`HTTP/1.0`)
+      val req = Request(uri = www_foo_test, httpVersion = HttpVersion.`HTTP/1.0`)
 
       val (request, response) = getSubmission(req, resp)
 
       request must not contain("Host:")
+      response must_==("done")
+    }
+
+    "Support flushing the prelude" in {
+      val req = Request(uri = www_foo_test, httpVersion = HttpVersion.`HTTP/1.0`)
+      /*
+       * We flush the prelude first to test connection liveness in pooled
+       * scenarios before we consume the body.  Make sure we can handle
+       * it.  Ensure that we still get a well-formed response.
+       */
+      val (request, response) = getSubmission(req, resp, true)
       response must_==("done")
     }
   }

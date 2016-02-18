@@ -1,16 +1,14 @@
-package org.http4s.server.blaze
+package org.http4s
+package server
+package blaze
 
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import javax.net.ssl.SSLEngine
 
-import org.http4s.blaze.channel.SocketConnection
-import org.http4s.{Request, AttributeEntry, AttributeMap}
 import org.http4s.blaze.http.http20._
 import org.http4s.blaze.http.http20.NodeMsg.Http2Msg
 import org.http4s.blaze.pipeline.{TailStage, LeafBuilder}
-import org.http4s.server.HttpService
-
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
@@ -30,7 +28,7 @@ object ProtocolSelector {
 
     def select(s: String): LeafBuilder[ByteBuffer] = s match {
       case "h2" | "h2-14" | "h2-15" => LeafBuilder(http2Stage(service, maxHeaderLen, requestAttributes, es))
-      case _                        => LeafBuilder(new Http1ServerStage(service, requestAttributes, es))
+      case _                        => LeafBuilder(Http1ServerStage(service, requestAttributes, es))
     }
 
     new ALPNSelector(engine, preference, select)

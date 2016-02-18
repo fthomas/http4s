@@ -1,4 +1,6 @@
-package org.http4s.client.blaze
+package org.http4s
+package client
+package blaze
 
 import java.nio.channels.AsynchronousChannelGroup
 import java.util.concurrent.ExecutorService
@@ -18,6 +20,6 @@ object SimpleHttp1Client {
      endpointAuthentication: Boolean = true,
               group: Option[AsynchronousChannelGroup] = None) = {
     val manager = ConnectionManager.basic(Http1Support(bufferSize,  userAgent, executor, sslContext, endpointAuthentication, group))
-    new BlazeClient(manager, idleTimeout, requestTimeout)
+    BlazeClient(manager, idleTimeout, requestTimeout)
   }
 }

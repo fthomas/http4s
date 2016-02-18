@@ -1,7 +1,3 @@
-import scala.math.Ordering.Implicits._
-import scala.util.Properties
-
-import com.earldouglas.xwp.XwpPlugin
 import com.typesafe.sbt.SbtGhPages.GhPagesKeys._
 import com.typesafe.sbt.SbtSite.site
 import com.typesafe.sbt.SbtSite.SiteKeys._
@@ -10,11 +6,10 @@ import com.typesafe.sbt.site.JekyllSupport
 import com.typesafe.tools.mima.plugin.MimaPlugin.mimaDefaultSettings
 import com.typesafe.tools.mima.plugin.MimaKeys._
 import sbtunidoc.Plugin.UnidocKeys._
-import pl.project13.scala.sbt.SbtJmh.jmhSettings
 
 // Global settings
 organization in ThisBuild := "org.http4s"
-version      in ThisBuild := "0.12.0-SNAPSHOT"
+version      in ThisBuild := "0.13.0-SNAPSHOT"
 apiVersion   in ThisBuild <<= version.map(extractApiVersion)
 scalaVersion in ThisBuild := "2.10.6"
 crossScalaVersions in ThisBuild <<= scalaVersion(Seq(_, "2.11.7"))
@@ -25,10 +20,9 @@ description := "A minimal, Scala-idiomatic library for HTTP"
 noPublishSettings
 
 lazy val core = libraryProject("core")
-  .settings(buildInfoSettings)
+  .enablePlugins(BuildInfoPlugin)
   .settings(
     description := "Core http4s library for servers and clients",
-    sourceGenerators in Compile <+= buildInfo,
     buildInfoKeys := Seq[BuildInfoKey](version, scalaVersion, apiVersion),
     buildInfoPackage <<= organization,
     libraryDependencies <++= scalaVersion { v => Seq(
@@ -38,7 +32,7 @@ lazy val core = libraryProject("core")
       scalaReflect(v) % "provided",
       scalazCore,
       scalazStream,
-      scodecBits
+      shapeless
     ) },
     libraryDependencies <++= scalaVersion (
       VersionNumber(_).numbers match {
@@ -83,6 +77,16 @@ lazy val blazeClient = libraryProject("blaze-client")
   )
   .dependsOn(blazeCore % "compile;test->test", client % "compile;test->test")
 
+lazy val asyncHttpClient = libraryProject("async-http-client")
+  .settings(
+    description := "async http client implementation for http4s clients",
+    libraryDependencies ++= Seq(
+      asyncHttp,
+      reactiveStreamsTck % "test"
+    )
+  )
+  .dependsOn(core % "compile;test->test", client % "compile;test->test")
+
 lazy val servlet = libraryProject("servlet")
   .settings(
     description := "Portable servlet implementation for http4s servers",
@@ -102,7 +106,7 @@ lazy val jetty = libraryProject("jetty")
       jettyServlet
     )
   )
-  .dependsOn(servlet)
+  .dependsOn(servlet, theDsl % "test->test")
 
 lazy val tomcat = libraryProject("tomcat")
   .settings(
@@ -186,7 +190,7 @@ lazy val twirl = http4sProject("twirl")
   .dependsOn(core % "compile;test->test")
 
 lazy val bench = http4sProject("bench")
-  .settings(jmhSettings)
+  .enablePlugins(JmhPlugin)
   .settings(noPublishSettings)
   .settings(
     description := "Benchmarks for http4s"
@@ -223,6 +227,20 @@ lazy val docs = http4sProject("docs")
         examplesWar,
         loadTest
       ),
+    // documentation source code linking
+    scalacOptions in (Compile,doc) <++= (version, apiVersion, scmInfo, baseDirectory in ThisBuild) map {
+      case (v, (maj,min), Some(s), b) => 
+        val sourceTemplate =
+          if (v.endsWith("SNAPSHOT"))
+            s"${s.browseUrl}/tree/master€{FILE_PATH}.scala"
+          else 
+            s"${s.browseUrl}/tree/v$maj.$min.0€{FILE_PATH}.scala"
+        Seq("-implicits",
+            "-doc-source-url", sourceTemplate,
+            "-sourcepath", b.getAbsolutePath)
+      case _ => Seq.empty
+    },
+    includeFilter in (JekyllSupport.Jekyll) := "*.html" | "*.css" | "*.png" | "*.jpg" | "*.gif" | "*.js" | "*.swf" | "*.json" | "CNAME",
     siteMappings <++= (mappings in (ScalaUnidoc, packageDoc), apiVersion) map {
       case (m, (major, minor)) => for ((f, d) <- m) yield (f, s"api/$major.$minor/$d")
     },
@@ -231,9 +249,7 @@ lazy val docs = http4sProject("docs")
     ghpagesNoJekyll := false,
     cleanSite <<= Http4sGhPages.cleanSite0,
     synchLocal <<= Http4sGhPages.synchLocal0,
-    git.remoteRepo := Properties.envOrNone("GH_TOKEN").fold("git@github.com:http4s/http4s.git"){ token =>
-      s"https://${token}@github.com/http4s/http4s.git"
-    }
+    git.remoteRepo := "git@github.com:http4s/http4s.git"
   )
   .dependsOn(blazeClient, blazeServer, jetty, theDsl, argonaut, scalaXml, twirl)
 
@@ -270,7 +286,7 @@ lazy val examplesJetty = exampleProject("examples-jetty")
     description := "Example of http4s server on Jetty",
     fork := true,
     libraryDependencies += metricsServlets,
-    mainClass in Revolver.reStart := Some("com.example.http4s.jetty.JettyExample")
+    mainClass in reStart := Some("com.example.http4s.jetty.JettyExample")
   )
   .dependsOn(jetty)
 
@@ -280,20 +296,20 @@ lazy val examplesTomcat = exampleProject("examples-tomcat")
     description := "Example of http4s server on Tomcat",
     fork := true,
     libraryDependencies += metricsServlets,
-    mainClass in Revolver.reStart := Some("com.example.http4s.jetty.JettyExample")
+    mainClass in reStart := Some("com.example.http4s.tomcat.TomcatExample")
   )
   .dependsOn(tomcat)
 
+// Run this with jetty:start
 lazy val examplesWar = exampleProject("examples-war")
-  .settings(XwpPlugin.jetty())
+  .enablePlugins(JettyPlugin)
   .settings(
     description := "Example of a WAR deployment of an http4s service",
     fork := true,
     libraryDependencies ++= Seq(
       javaxServletApi % "provided",
       logbackClassic % "runtime"
-    ),
-    mainClass in Revolver.reStart := Some("com.example.http4s.jetty.JettyExample")
+    )
   )
   .dependsOn(servlet)
 
@@ -397,11 +413,12 @@ lazy val commonSettings = Seq(
     else Seq.empty
   ),
   libraryDependencies  ++= Seq(
+    logbackClassic,
     scalameter,
     scalazScalacheckBinding,
-    scalaCheck,
     specs2,
-    specs2_scalacheck
+    specs2MatcherExtra,
+    specs2Scalacheck
   ).map(_ % "test")
 )
 
@@ -423,7 +440,13 @@ lazy val mimaSettings = mimaDefaultSettings ++ Seq(
   failOnProblem <<= version(compatibleVersion(_).isDefined),
   previousArtifact <<= (version, organization, scalaBinaryVersion, moduleName)((ver, org, binVer, mod) => compatibleVersion(ver) map {
     org % s"${mod}_${binVer}" % _
-  })
+  }),
+  binaryIssueFilters ++= {
+    import com.typesafe.tools.mima.core._
+    import com.typesafe.tools.mima.core.ProblemFilters._
+    Seq(
+    )
+  }
 )
 
 // Check whether to enable java 8 type lambdas

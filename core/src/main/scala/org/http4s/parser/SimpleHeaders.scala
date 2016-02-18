@@ -53,7 +53,7 @@ private[parser] trait SimpleHeaders {
   }
 
   def CONTENT_LENGTH(value: String) = new Http4sHeaderParser[`Content-Length`](value) {
-    def entry = rule { Digits ~ EOL ~> {s: String => `Content-Length`(s.toInt)} }
+    def entry = rule { Digits ~ EOL ~> {s: String => `Content-Length`(s.toLong)} }
   }.parse
 
   def CONTENT_ENCODING(value: String) = new Http4sHeaderParser[`Content-Encoding`](value) {
@@ -98,7 +98,7 @@ private[parser] trait SimpleHeaders {
   }.parse
 
   def ETAG(value: String) = new Http4sHeaderParser[ETag](value) {
-    def entry = rule { EntityTag ~> (ETag(_)) }
+    def entry = rule { EntityTag ~> (ETag(_: ETag.EntityTag)) }
   }.parse
 
   def IF_NONE_MATCH(value: String) = new Http4sHeaderParser[`If-None-Match`](value) {

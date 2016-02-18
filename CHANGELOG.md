@@ -1,3 +1,44 @@
+# v0.12.1 (2016-01-30)
+* Encode keys as well as values when rendering a query.
+* Don't encode '?' or '/' when encoding a query.
+
+# v0.12.0 (2016-01-15)
+* Refactor the client API for resource safety when not reading the entire body.
+* Rewrite client connection pool to support  maximum concurrent connections instead of maximum idle connections.
+* Optimize body collection for better connection keep-alive rate.
+* Move `Service` and `HttpService`, because a `Client` can be viewed as a `Service`.
+* Remove custom `DateTime` in favor of `java.time.Instant`.
+* Support status 451 Unavailable For Legal Reasons.
+* Various blaze-client optimizations.
+* Don't let Blaze `IdentityWriter` write more than Content-Length bytes.
+* Remove `identity` `Transfer-Encoding`, which was removed in HTTP RFC errata.
+* In blaze, `requireClose` is now the return value of `writeEnd`.
+* Remove body from `Request.toString` and `Response.toString`.
+* Move blaze parser into its own class.
+* Trigger a disconnect if an ignored body is too long.
+* Configurable thread factories for happier profiling.
+* Fix possible deadlock in default client execution context.
+
+# v0.11.3 (2015-12-28)
+* Blaze upgrade to fix parsing HTTP responses without a reason phrase.
+* Don't write more than Content-Length bytes in blaze.
+* Fix infinite loop in non-blocking Servlet I/O.
+* Never write a response body on HEAD requests to blaze.
+* Add missing `'&'` between multivalued k/v pairs in `UrlFormCodec.encode`
+
+# v0.11.2 (2015-12-04)
+* Fix stack safety issue in async servlet I/O.
+* Reduce noise from timeout exceptions in `ClientTimeoutStage`.
+* Address file descriptor leaks in blaze-client.
+* Fix `FollowRedirect` middleware for 303 responses.
+* Support keep-alives for client requests with bodies. 
+
+# v0.11.1 (2015-11-29)
+* Honor `connectorPoolSize` and `bufferSize` parameters in `BlazeBuilder`.
+* Add convenient `ETag` header constructor.
+* Wait for final chunk to be written before closing the async context in non-blocking servlet I/O.
+* Upgrade to jawn-streamz-0.7.0 to use scalaz-stream-0.8 across the board.
+
 # v0.11.0 (2015-11-20)
 * Upgrade to scalaz-stream 0.8
 * Add Circe JSON support module.
